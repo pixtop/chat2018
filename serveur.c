@@ -18,6 +18,7 @@
 */
 
 #include <unistd.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -47,80 +48,132 @@ typedef struct dde {
 
 static const int maxParticipants = NBPARTICIPANTS+1+TAILLE_TUBE/sizeof(demande);
 
-participant participants [NBPARTICIPANTS+sizeof(char)1+TAILLE_TUBE/sizeof(demande)]; //maxParticipants
+participant participants [NBPARTICIPANTS+sizeof(char)+1+TAILLE_TUBE/sizeof(demande)]; //maxParticipants
 char buf[TAILLE_TUBE];
 int nbactifs = 0;
 
+void sigint_handler(int sig) {
+  unlink("./ecoute");
+  printf("\n");
+  exit(0);
+}
+
 void effacer(int i) {
-    participants[i].actif = false;
-    bzero(participants[i].nom, TAILLE_NOM*sizeof(char));
-    participants[i].in = -1;
-    participants[i].out = -1;
+  participants[i].actif = false;
+  bzero(participants[i].nom, TAILLE_NOM*sizeof(char));
+  participants[i].in = -1;
+  participants[i].out = -1;
 }
 
 void diffuser(char *dep) {
-  int i = 0;
-  while (!strcmp(participants[i].nom, dep)) i++;
-
+  int i;
+  for (i = 0; i < maxParticipants; i++)
+    if (participants[i].actif == true)
+      write(participants[i].out, dep, TAILLE_MSG);
 }
 
-void desactiver (int p) {
 /* traitement d'un participant déconnecté */
-for (i=0; i<maxParticipants; i++) {
-    effacer(i);
-}
+void desactiver (int p) {
+  close(participants[p].in);
+  close(participants[p].out);
+  effacer(p);
+  nbactifs--;
 }
 
-void ajouter(char *dep) {
 /*  Pré : nbactifs < maxParticpants
-	Ajoute un nouveau participant de pseudo dep.
-	Si le participant est "fin", termine le serveur.
+Ajoute un nouveau participant de pseudo dep.
+Si le participant est "fin", termine le serveur.
 */
-  if (!strcmp(dep,"fin")) {
-    int i = 0;
-    char path[strlen(dep)+4] = dep;
-    while (participants[i].actif == true) i++;
-    participants[i].actif = true;participants[i].nom = dep;
-    participants[i].nom = dep;
-    participants[i].in = pen(strcat(path,));
+void ajouter(char *dep) {
+  if (strcmp(dep,"fin") != 0) {
+    int i;
+    char connexion[TAILLE_MSG] = "[service] ";
+    strcat(connexion, dep);
+    strcat(connexion, " rejoint la conversation");
+    char path[TAILLE_NOM+6] = "./";
+    strcat(path, dep);
+    for (i = 0; i < maxParticipants; i++) {
+      if (participants[i].actif == false) {
+        participants[i].actif = true;
+        strcpy(participants[i].nom, dep);
+        participants[i].in = open(strcat(strdup(path), "_C2S"), O_RDONLY);
+        participants[i].out = open(strcat(strdup(path), "_S2C"), O_WRONLY);
+        diffuser(connexion);
+        nbactifs++;
+        return;
+      }
+    }
   }
-  else {
+  unlink("./ecoute");
+  exit(0);
+}
 
+/* Copie ou tronque le texte dans la chaine msg[len] */
+char *strntrunc(char *msg, const char *texte, size_t len) {
+  int i;
+  for (i=0;i<len;i++) {
+      if (texte[i] == '\n'||'\0') {
+        msg[i]='\0';
+        return strncpy(msg,texte,i);
+      }
   }
-
+  return strncpy(msg,texte,len-1);
 }
 
 int main (int argc, char *argv[]) {
-    int i,nlus,necrits,res;
-    int ecoute;		/* descripteur d'écoute */
-    fd_set readfds; /* ensemble de descripteurs écoutés par un select éventuel */
-    char * buf0;   /* pour parcourir le contenu d'un tube, si besoin */
-    char pseudo[TAILLE_NOM];
+  int i,nlus,res;
+  int ecoute;		/* descripteur d'écoute */
+  fd_set readfds; /* ensemble de descripteurs écoutés par un select éventuel */
+  char msg[TAILLE_MSG];   /* pour parcourir le contenu d'un tube, si besoin */
+  demande dde;
+  signal(SIGINT, sigint_handler);
 
-    /* création (puis ouverture) du tube d'écoute */
-    mkfifo("./ecoute",S_IRUSR|S_IWUSR); // mmnémoniques sys/stat.h: S_IRUSR|S_IWUSR = 0600
-    ecoute=open("./ecoute",O_RDONLY);
+  /* création (puis ouverture) du tube d'écoute */
+  mkfifo("./ecoute",S_IRUSR|S_IWUSR); // mmnémoniques sys/stat.h: S_IRUSR|S_IWUSR = 0600
+  ecoute=open("./ecoute",O_RDONLY);
 
+  /* initialisation de la liste des participants */
+  for (i=0; i<maxParticipants; i++) effacer(i);
+
+  while (true) {
+    printf("participants actifs : %d\n", nbactifs);
+  	/* boucle du serveur : traiter les requêtes en attente
+  		sur le tube d'écoute et les tubes d'entrée
+  	*/
     FD_ZERO(&readfds);
-    FD_SET(ecoute, &readfds);
-
-    for (i=0; i<maxParticipants; i++) {
-        effacer(i);
+    if (nbactifs < NBPARTICIPANTS)
+      FD_SET(ecoute, &readfds);
+    for (i=0; i<maxParticipants; i++)
+      if (participants[i].actif == true) FD_SET(participants[i].in, &readfds);
+    if (res = select(NBDESC, &readfds, NULL, NULL, NULL) < 0) {
+      printf("Erreur lors du select\n");
+      exit(1);
     }
-
-    while (true) {
-      printf("participants actifs : %d\n",nbactifs);
-		/* boucle du serveur : traiter les requêtes en attente
-			sur le tube d'écoute et les tubes d'entrée
-		*/
-      res = select(NBDESC, &readfds, NULL, NULL)
-      if (res != -1) {
-          if (FD_ISSET(ecoute, &readfds) != 0) {
-            nlus = read(ecoute, buf0, TAILLE_TUBE);
-            ajouter(strncpy(pseudo, buf0, nlus));
-            nbactifs++;
-            write(open(pseudo+"_s2c"))
-          }
+    //tube d'écoute
+    if (FD_ISSET(ecoute, &readfds) != 0) {
+      if (nlus = read(ecoute, buf, TAILLE_MSG) > 0)
+        ajouter(strntrunc(dde.nom,buf,TAILLE_NOM));
+      else {
+        //cas particuliers où il n'y a plus personne dans la conversation.
+        i=0;
+        while (participants[i].actif != true) i++;
+        desactiver(i);
+        printf("participants actifs : %d\n", nbactifs);
+        ecoute=open("./ecoute",O_RDONLY);
       }
     }
+    //tubes d'entrée
+    else {
+      for (i=0; i<maxParticipants; i++) {
+        if (FD_ISSET(participants[i].in, &readfds) != 0) {
+          if (nlus = read(participants[i].in, buf, TAILLE_TUBE) < 1) {
+            strcpy(buf, "[service] ");strcat(buf, participants[i].nom);
+            strcat(buf, " quitte la conversation");
+            desactiver(i);
+          }
+          diffuser(strntrunc(msg,buf,TAILLE_MSG));
+        }
+      }
+    }
+  }
 }
